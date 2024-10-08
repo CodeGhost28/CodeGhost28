@@ -1,14 +1,27 @@
-# Dockerfile
+# Dockerfile for ProfitX Frontend
 
-FROM python:3.9-slim
+# Base image
+FROM node:16-alpine
 
+# Set the working directory inside the container
 WORKDIR /app
 
-COPY requirements.txt requirements.txt
-RUN pip install -r requirements.txt
+# Copy the package.json and install dependencies
+COPY package*.json ./
+RUN npm install
 
+# Copy the rest of the code
 COPY . .
 
-EXPOSE 5000
+# Build the app for production
+RUN npm run build
 
-CMD ["python", "app.py"]
+# Use nginx to serve the production build
+FROM nginx:alpine
+COPY --from=0 /app/build /usr/share/nginx/html
+
+# Expose port 80
+EXPOSE 80
+
+# Run nginx
+CMD ["nginx", "-g", "daemon off;"]
