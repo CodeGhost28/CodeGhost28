@@ -1,0 +1,22 @@
+# docker-compose.yml
+
+version: '3'
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "5000:5000"
+    environment:
+      - OANDA_API_KEY=your_oanda_api_key
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+  redis:
+    image: redis
+    ports:
+      - "6379:6379"
