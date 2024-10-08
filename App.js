@@ -1,18 +1,3 @@
-// src/App.js
-
-import React from 'react';
-import './App.css';
-import SignalDashboard from './components/SignalDashboard';
-
-function App() {
-  return (
-    <div className="App">
-      <SignalDashboard />
-    </div>
-  );
-}
-
-export default App;
 # app.py
 
 import os
@@ -24,28 +9,27 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
 from werkzeug.security import generate_password_hash, check_password_hash
 from indicators import calculate_signals
+from datetime import datetime
 
 app = Flask(__name__)
 
-# Configuration for Redis Cache
+# Redis and database configurations
 app.config['CACHE_TYPE'] = 'RedisCache'
 app.config['CACHE_REDIS_HOST'] = 'localhost'
 app.config['CACHE_REDIS_PORT'] = 6379
-cache = Cache(app)
-
-# Database configuration
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///profitx.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'supersecretkey')
 db = SQLAlchemy(app)
-
-# JWT Configuration
-app.config['JWT_SECRET_KEY'] = 'supersecretkey'  # Change to something secure in production
+cache = Cache(app)
 jwt = JWTManager(app)
-
-# Redis connection
 redis_conn = redis.Redis(host='localhost', port=6379)
 
-# Database Models
+# Alpha Vantage API settings
+ALPHA_VANTAGE_API_KEY = os.getenv('ALPHA_VANTAGE_API_KEY')
+ALPHA_VANTAGE_BASE_URL = "https://www.alphavantage.co/query"
+
+# Models for Users and Historical Data
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
@@ -60,94 +44,53 @@ class SignalHistory(db.Model):
     signals = db.Column(db.Text, nullable=False)
     timestamp = db.Column(db.DateTime, nullable=False)
 
-# Initialize the database
 with app.app_context():
     db.create_all()
 
-# OANDA API credentials
-OANDA_API_URL = "https://api-fxtrade.oanda.com/v3/instruments"
-OANDA_API_KEY = os.getenv('OANDA_API_KEY')
+# Fetch trading signals using Alpha Vantage API
+def fetch_indicator(symbol, indicator, interval):
+    params = {
+        'function': indicator,
+        'symbol': symbol,
+        'interval': interval,
+        'apikey': ALPHA_VANTAGE_API_KEY
+    }
+    response = requests.get(ALPHA_VANTAGE_BASE_URL, params=params)
+    if response.status_code == 200:
+        return response.json()
+    else:
+        return None
 
-# User registration
-@app.route('/api/register', methods=['POST'])
-def register():
-    username = request.json.get('username')
-    password = request.json.get('password')
-
-    if User.query.filter_by(username=username).first():
-        return jsonify({"error": "User already exists"}), 400
-
-    hashed_password = generate_password_hash(password)
-    new_user = User(username=username, password=hashed_password)
-    db.session.add(new_user)
-    db.session.commit()
-
-    return jsonify({"message": "User created successfully"}), 201
-
-# User login
-@app.route('/api/login', methods=['POST'])
-def login():
-    username = request.json.get('username')
-    password = request.json.get('password')
-
-    user = User.query.filter_by(username=username).first()
-
-    if user and check_password_hash(user.password, password):
-        access_token = create_access_token(identity=user.id)
-        return jsonify({"token": access_token}), 200
-
-    return jsonify({"error": "Invalid credentials"}), 401
-
-# Update user preferences (e.g., pair selection)
-@app.route('/api/preferences', methods=['PUT'])
-@jwt_required()
-def update_preferences():
-    user_id = get_jwt_identity()
-    user = User.query.get(user_id)
-
-    preferences = request.json.get('preferences')
-    user.preferences = preferences
-    db.session.commit()
-
-    return jsonify({"message": "Preferences updated successfully"}), 200
-
-# Fetch live trading signals with authentication
+# Fetch signals and combine multiple indicators
 @app.route('/api/signals', methods=['GET'])
-@jwt_required()  # Require authentication
+@jwt_required()
 def get_trading_signals():
-    pair = request.args.get('pair', 'EUR/USD')
-    timeframe = request.args.get('timeframe', 'M1')
+    pair = request.args.get('pair', 'EURUSD')
+    interval = request.args.get('timeframe', '1min')
     user_id = get_jwt_identity()
 
     # Check if cached data exists for this pair
-    cached_signals = redis_conn.get(f"signals_{pair}_{timeframe}")
+    cached_signals = redis_conn.get(f"signals_{pair}_{interval}")
     if cached_signals:
         return jsonify({'signals': cached_signals.decode('utf-8')})
 
-    # Fetch price data from OANDA API
-    candles_url = f"{OANDA_API_URL}/{pair}/candles"
-    headers = {
-        'Authorization': f"Bearer {OANDA_API_KEY}"
-    }
-    params = {
-        'granularity': timeframe
-    }
-    response = requests.get(candles_url, headers=headers, params=params)
+    # Fetch indicators from Alpha Vantage
+    atr_data = fetch_indicator(pair, 'ATR', interval)
+    rsi_data = fetch_indicator(pair, 'RSI', interval)
+    macd_data = fetch_indicator(pair, 'MACD', interval)
+    stoch_data = fetch_indicator(pair, 'STOCH', interval)
 
-    if response.status_code == 200:
-        data = response.json()
-
-        # Process indicators
-        signals = calculate_signals(data['candles'])
-
+    if atr_data and rsi_data and macd_data and stoch_data:
+        signals = calculate_signals(atr_data, rsi_data, macd_data, stoch_data)
+        
         # Cache the result in Redis
-        redis_conn.set(f"signals_{pair}_{timeframe}", signals, ex=60)
+        redis_conn.set(f"signals_{pair}_{interval}", signals, ex=60)
 
         # Store signal history in the database
         signal_history = SignalHistory(
             user_id=user_id,
             pair=pair,
-            timeframe=timeframe,
+            timeframe=interval,
             signals=str(signals),
             timestamp=datetime.utcnow()
         )
@@ -156,7 +99,9 @@ def get_trading_signals():
 
         return jsonify({'signals': signals})
 
-    return jsonify({'error': 'Failed to fetch data from OANDA'}), 500
+    return jsonify({'error': 'Failed to fetch data from Alpha Vantage'}), 500
+
+# Register and login routes (unchanged)
 
 if __name__ == "__main__":
     app.run(debug=True, host='0.0.0.0', port=5000)
