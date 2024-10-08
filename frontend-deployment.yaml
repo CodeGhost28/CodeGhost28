@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: profitx-frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: profitx-frontend
+  template:
+    metadata:
+      labels:
+        app: profitx-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: your-frontend-image
+          ports:
+            - containerPort: 3000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-service
+spec:
+  selector:
+    app: profitx-frontend
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 3000
+  type: LoadBalancer
